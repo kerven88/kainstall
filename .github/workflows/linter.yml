@@ -1,57 +1,46 @@
----
-###########################
-###########################
-## Linter GitHub Actions ##
-###########################
-###########################
-name: Lint Code Base
-
-#
-# Documentation:
-# https://help.github.com/en/articles/workflow-syntax-for-github-actions
-#
-
-#############################
-# Start the job on all push #
-#############################
+name: Compatibility checks
 on:
   push:
   pull_request:
-    branches: [master]
-
-###############
-# Set the Job #
-###############
+  workflow_dispatch:
+permissions:
+  contents: read
 jobs:
-  build:
-    # Name the Job
-    name: Lint Code Base
-    # Set the agent to run on
+  test:
     runs-on: ubuntu-latest
-
-    ##################
-    # Load all steps #
-    ##################
     steps:
-      ##########################
-      # Checkout the code base #
-      ##########################
-      - name: Checkout Code
-        uses: actions/checkout@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
         with:
-          # Full git history is needed to get a proper list of changed files within `super-linter`
-          fetch-depth: 0
-      - name: Setup script executable
+          python-version: '3.12'
+      - run: python3 -m unittest discover -s tests -v
+      - name: Bash syntax
         run: |
-          chmod +x *.sh
-
-      ################################
-      # Run Linter against code base #
-      ################################
-      - name: Lint Code Base
-        uses: github/super-linter@v3
+          for script in kainstall*.sh lib/*.sh tests/*.sh; do bash -n "$script"; done
+      - name: ShellCheck
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y shellcheck
+          shellcheck -x -P SCRIPTDIR kainstall*.sh lib/*.sh tests/*.sh
+  kubeadm-schema:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        minor: ['1.35', '1.36', '1.37']
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate generated configs with matching kubeadm
         env:
-          VALIDATE_ALL_CODEBASE: false
-          ERROR_ON_MISSING_EXEC_BIT: true
-          DEFAULT_BRANCH: master
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MINOR: ${{ matrix.minor }}
+        run: |
+          set -Eeuo pipefail
+          version=$(curl -fsSL --retry 3 "https://dl.k8s.io/release/stable-${MINOR}.txt")
+          [[ "$version" =~ ^v1\.(35|36|37)\.[0-9]+$ ]]
+          test_bin=$(mktemp -d)
+          trap 'rm -rf "$test_bin"' EXIT
+          curl -fsSL --retry 3 "https://dl.k8s.io/release/${version}/bin/linux/amd64/kubeadm" -o "$test_bin/kubeadm"
+          curl -fsSL --retry 3 "https://dl.k8s.io/release/${version}/bin/linux/amd64/kubeadm.sha256" -o "$test_bin/kubeadm.sha256"
+          printf '%s  %s\n' "$(cat "$test_bin/kubeadm.sha256")" "$test_bin/kubeadm" | sha256sum --check -
+          chmod +x "$test_bin/kubeadm"
+          KUBEADM_BIN="$test_bin/kubeadm" bash tests/validate-kubeadm.sh "${version#v}"
